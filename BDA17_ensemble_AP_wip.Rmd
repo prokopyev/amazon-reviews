@@ -1,0 +1,493 @@
+---
+title: "HW5_Kaggle"
+author: "Anton Prokopyev"
+date: "5/5/2017"
+output:  html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 
+
+```{r}
+rm(list = ls(all.names = TRUE))
+setwd('/Users/MacBookAir/Desktop/GoogleDrive/DATA/R/r-big-data/HW5_Kaggle/')
+
+library(tm)
+```
+
+
+```{r}
+getwd()
+# Read the test set
+train.df <- read.csv('train.tsv',sep='\t',stringsAsFactors = FALSE)
+train2.df <- read.csv('validation.tsv',sep='\t',stringsAsFactors = FALSE)
+train.df <- rbind(train.df, train2.df)
+
+# Read the validation set
+# valid.df <- read.csv('validation.tsv',sep='\t',stringsAsFactors = FALSE)
+# Now replace it with test data but still it's called validation == I'm lazy to rewrite
+valid.df <- read.csv('test_pred.tsv',sep='\t',stringsAsFactors = FALSE, header = FALSE, 
+                     col.names = c("X","sentence"))
+valid.df$class <- 9999
+
+# Read the test set
+# This file is not provided yet will be available later
+# test.df <- read.csv('test_pred',sep='\t',header = FALSE,stringsAsFactors = FALSE,col.names = c('id','sentence'))
+
+# Lets see the distribution of training set
+number_of_postive <- dim(train.df[train.df['class'] == 1,])[1]
+number_of_negative <- dim(train.df[train.df['class'] == 0,])[1]
+print(number_of_postive)
+print(number_of_negative)
+
+```
+
+```{r}
+# Using the dataset to build your corpus
+# Refer to the text mining handout for other possible transformations.
+myCorpusFull <- Corpus(VectorSource(train.df$sentence))
+myCorpusFull <- tm_map(myCorpusFull, tolower)
+
+positive.df = train.df[train.df['class'] == 1,]
+nagative.df = train.df[train.df['class'] == 0,]
+
+train.df$training = 1
+valid.df$training = 0
+vtrain.df <- rbind(train.df, valid.df)
+```
+
+
+
+
+```{r}
+library(quanteda)
+vtrain.df$sentence <- as.character(vtrain.df$sentence)
+
+corpus <- corpus(vtrain.df$sentence, 
+                 docvars=vtrain.df)
+# summary(corpus)
+
+toks <- tokens(corpus)
+toks <- tokens_ngrams(toks, n = 1:3)
+
+doc.features <- dfm(toks, verbose = TRUE, stem = TRUE)
+doc.features <- dfm_trim(doc.features, min_count = 1)
+np <- sum(vtrain.df$class==1)
+ns <- sum(vtrain.df$class==0)
+D = np + ns
+m <- t(doc.features)
+nj <- apply(m,1,function (x) sum(x>0))
+nnotj <- apply(m,1,function (x) sum(x==0))
+njp <- apply(m[,train.df$class==1], 1, function (x) sum(x>0))
+njs <- apply(m[,train.df$class==0], 1, function (x) sum(x>0))
+nnotjp <- apply(m[,train.df$class==1], 1, function (x) sum(x==0))
+nnotjs <- apply(m[,train.df$class==0], 1, function (x) sum(x==0))
+
+mi <- njp/D*log((njp*D)/(np*nj),2)+ njs/D*log((njs*D)/(nj*ns),2) +
+  nnotjp/D*log((nnotjp*D)/(np*nnotj),2) +
+  nnotjs/D*log((nnotjs*D)/(nnotj*ns),2) 
+names(mi) <- featnames(doc.features)
+
+m <- as.matrix(doc.features)
+m <- m[,colnames(m)%in%names(mi)[mi>.00199]]
+
+
+```
+
+
+
+```{r}
+library(glmnet)
+lasso.1 <- glmnet(m[vtrain.df$training==1,], vtrain.df$class[vtrain.df$training==1],
+                  family="binomial", alpha=1)
+lasso.1$lambda
+lasso.1$beta[,1]
+lasso.1$beta[,20]
+
+predict.test <- predict(lasso.1, m[vtrain.df$training==0,])
+dim(predict.test)
+predict.test[1:10,1:10]
+
+predict.mat <- ifelse(predict.test>0,1,0)
+table(predict.mat[,20],vtrain.df$class[vtrain.df$training==0])
+table(predict.mat[,1],vtrain.df$class[vtrain.df$training==0])
+```
+
+```{r}
+cv <- cv.glmnet(m[vtrain.df$training==1,], vtrain.df$class[vtrain.df$training==1],
+                family="binomial", alpha=1, 
+                type="class")
+names(cv)
+plot(log(cv$lambda), cv$cvm, xlab="Log Lambda", ylab="Mean Cross-Validated Error")
+```
+
+
+```{r}
+results.df <- valid.df
+  
+results.df$LASSO <- predict(cv, newx = m[vtrain.df$training==0,], s = "lambda.min", type = "class")
+
+# library(caret)
+# confusionMatrix(results.df$LASSO, results.df$class)
+
+```
+
+
+
+
+```{r}
+# Lets build a very simple random model
+# This model just predicts 0 or 1 at random
+# Please use this template to save your results to a file that kaggle expects.
+# Once the test set is out run this code, submit the generated file to kaggle 
+# and check your position on the leaderboard.
+
+# Kaggle submission should have a id column that should match your predction id
+# I didn't scramble the test set so id's will be in order
+# so just generate consequtive numbers
+# baseline_id <- 0:(dim(test.df)[1]-1)
+
+# This is a random model predict 0 or 1 randomly
+# baseline_pred <- sample(x = c(0,1), size = dim(test.df)[1], replace = TRUE)
+# results.df <- data.frame("id"=test.df$id,"class"=baseline_pred)
+# write.csv(results.df,file='my_submission_random.csv',row.names = FALSE)
+```
+
+
+
+
+*************
+#### XGBoost
+
+```{r}
+library(FeatureHashing)
+library(Matrix)
+library(xgboost)
+```
+
+```{r}
+# vtrain.df <- rbind(train.df, valid.df[,1:4])
+
+vtrain.df$edited <- tolower(gsub("[^[:alnum:] ]", " ", vtrain.df$sentence))
+
+strwrap(vtrain.df$edited[1], width = 80)
+
+d1 <- hashed.model.matrix(~ split(edited, delim = " ", type = "tf-idf"),
+                          data = vtrain.df, hash.size = 2^16, signed.hash = FALSE)
+
+as.integer(which(d1[1, ] != 0))
+```
+
+```{r}
+# train <- c(1:560); valid <- c(1:nrow(vtrain.df))[-train]
+train <- c(1:700); valid <- c(1:nrow(vtrain.df))[-train]
+dtrain <- xgb.DMatrix(d1[train,], label = vtrain.df$class[vtrain.df$training==1])
+dvalid <- xgb.DMatrix(d1[valid,], label = vtrain.df$class[vtrain.df$training==0])
+watch <- list(train = dtrain, valid = dvalid)
+```
+
+```{r}
+m1 <- xgb.train(booster = "gblinear", nrounds = 1000, eta = 0.02,
+                data = dtrain, objective = "binary:logistic",
+                watchlist = watch, eval_metric = "error", verbose = 0)
+
+results.df$probXGB <- predict(m1, newdata = m[vtrain.df$training==0,], outputmargin = FALSE)
+
+results.df$XGB[which(results.df$probXGB < 0.75)] <- 0
+results.df$XGB[which(results.df$probXGB > 0.75)] <- 1
+
+# 
+# library(caret)
+# confusionMatrix(results.df$XGB, results.df$class)
+```
+
+```{r}
+importance_matrix <- xgb.importance(model = m1)
+# print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix, top_n = 100)
+```
+
+
+
+
+
+```{r}
+# loading packages
+library(twitteR)
+library(ROAuth)
+library(tidyverse)
+library(text2vec)
+library(caret)
+library(glmnet)
+library(ggrepel)
+ 
+### loading and preprocessing a training set of tweets
+# function for converting some symbols
+conv_fun <- function(x) iconv(x, "latin1", "ASCII", "")
+ 
+##### loading classified tweets ######
+# source: http://help.sentiment140.com/for-students/
+# 0 - the polarity of the tweet (0 = negative, 4 = positive)
+# 1 - the id of the tweet
+# 2 - the date of the tweet
+# 3 - the query. If there is no query, then this value is NO_QUERY.
+# 4 - the user that tweeted
+# 5 - the text of the tweet
+ 
+# tweets_classified <- read_csv('training.1600000.processed.noemoticon.csv',
+#  col_names = c('sentiment', 'id', 'date', 'query', 'user', 'text')) %>%
+#  # converting some symbols
+#  dmap_at('text', conv_fun) %>%
+#  # replacing class values
+#  mutate(sentiment = ifelse(sentiment == 0, 0, 1))
+#  
+# # there are some tweets with NA ids that we replace with dummies
+# tweets_classified_na <- tweets_classified %>%
+#  filter(is.na(id) == TRUE) %>%
+#  mutate(id = c(1:n()))
+# tweets_classified <- tweets_classified %>%
+#  filter(!is.na(id)) %>%
+#  rbind(., tweets_classified_na)
+ 
+# data splitting on train and test
+set.seed(2340)
+# trainIndex <- createDataPartition(tweets_classified$sentiment, p = 0.8, 
+#  list = FALSE, 
+#  times = 1)
+tweets_train <- train.df
+tweets_test <- valid.df
+ 
+##### doc2vec #####
+# define preprocessing function and tokenization function
+prep_fun <- tolower
+tok_fun <- word_tokenizer
+ 
+it_train <- itoken(tweets_train$sentence, 
+ preprocessor = prep_fun, 
+ tokenizer = tok_fun,
+ ids = tweets_train$X,
+ progressbar = TRUE)
+it_test <- itoken(tweets_test$sentence, 
+ preprocessor = prep_fun, 
+ tokenizer = tok_fun,
+ ids = tweets_test$X,
+ progressbar = TRUE)
+ 
+# creating vocabulary and document-term matrix
+vocab <- create_vocabulary(it_train)
+vectorizer <- vocab_vectorizer(vocab)
+dtm_train <- create_dtm(it_train, vectorizer)
+dtm_test <- create_dtm(it_test, vectorizer)
+# define tf-idf model
+tfidf <- TfIdf$new()
+# fit the model to the train data and transform it with the fitted model
+dtm_train_tfidf <- fit_transform(dtm_train, tfidf)
+dtm_test_tfidf <- fit_transform(dtm_test, tfidf)
+ 
+# train the model
+t1 <- Sys.time()
+glmnet_classifier <- cv.glmnet(x = dtm_train_tfidf,
+ y = tweets_train[['class']], 
+ family = 'binomial', 
+ # L1 penalty
+ alpha = 1,
+ # interested in the area under ROC curve
+ type.measure = "auc",
+ # 5-fold cross-validation
+ nfolds = 5,
+ # high value is less accurate, but has faster training
+ thresh = 1e-3,
+ # again lower number of iterations for faster training
+ maxit = 1e3)
+print(difftime(Sys.time(), t1, units = 'mins'))
+ 
+plot(glmnet_classifier)
+print(paste("max AUC =", round(max(glmnet_classifier$cvm), 4)))
+ 
+preds <- predict(glmnet_classifier, dtm_test_tfidf, type = 'response')[ ,1]
+auc(as.numeric(tweets_test$sentiment), preds)
+ 
+# save the model for future using
+saveRDS(glmnet_classifier, 'glmnet_classifier.RDS')
+#######################################################
+```
+
+
+```{r}
+### fetching tweets ###
+# download.file(url = "http://curl.haxx.se/ca/cacert.pem",
+# destfile = "cacert.pem")
+# setup_twitter_oauth('your_api_key', # api key
+# 'your_api_secret', # api secret
+# 'your_access_token', # access token
+# 'your_access_token_secret' # access token secret
+# )
+#  
+# df_tweets <- twListToDF(searchTwitter('setapp OR #setapp', n = 1000, lang = 'en')) %>%
+df_tweets <- valid.df
+
+# converting some symbols
+# dmap_at('text', conv_fun)
+ 
+# preprocessing and tokenization
+it_tweets <- itoken(df_tweets$sentence,
+preprocessor = prep_fun,
+tokenizer = tok_fun,
+ids = df_tweets$X,
+progressbar = TRUE)
+ 
+# creating vocabulary and document-term matrix
+dtm_tweets <- create_dtm(it_tweets, vectorizer)
+ 
+# transforming data with tf-idf
+dtm_tweets_tfidf <- fit_transform(dtm_tweets, tfidf)
+ 
+# loading classification model
+glmnet_classifier <- readRDS('glmnet_classifier.RDS')
+ 
+# predict probabilities of positiveness
+preds_tweets <- predict(glmnet_classifier, dtm_tweets_tfidf, type = 'response')[ ,1]
+ 
+# adding rates to initial dataset
+results.df$probT2V <- preds_tweets
+```
+
+
+```{r}
+results.df$text2vec[which(results.df$probT2V > 0.5)] <- 1
+results.df$text2vec[which(results.df$probT2V < 0.5)] <- 0
+
+# library(caret)
+# confusionMatrix(results.df$text2vec, results.df$class)
+```
+
+
+# Now stack the 3 models to get the best results
+
+```{r}
+results.df$sumstack <- as.numeric(results.df$LASSO) + results.df$XGB + results.df$text2vec
+
+
+results.df$stack[which(results.df$sumstack < 2)] <- 0
+results.df$stack[which(results.df$sumstack >= 2)] <- 1
+
+# library(caret)
+# confusionMatrix(results.df$stack, results.df$class)
+```
+
+
+```{r}
+results.df$sumstack2 <- as.numeric(results.df$LASSO) + results.df$text2vec
+
+# Care more about negative, so to be consideted positive both models need to agree
+results.df$stack2[which(results.df$sumstack2 < 2)] <- 0
+results.df$stack2[which(results.df$sumstack2 >= 2)] <- 1
+ 
+# library(caret)
+# confusionMatrix(results.df$stack2, results.df$class)
+```
+
+```{r}
+write.csv(results.df, file = "results.df.csv", row.names = FALSE)
+```
+
+
+```{r}
+submit1 <- results.df
+submit1 <- submit1[,c("X","stack")]
+library(plyr)
+submit1 <- rename(submit1, c("X"="id", "stack"="class"))
+write.csv(submit1, file = "submit1.csv", row.names = FALSE)
+```
+
+```{r}
+submit2 <- results.df
+submit2 <- submit2[,c("X","stack2")]
+library(plyr)
+submit1 <- rename(submit2, c("X"="id", "stack2"="class"))
+write.csv(submit1, file = "submit2.csv", row.names = FALSE)
+```
+
+```{r}
+submit3 <- results.df
+submit3 <- submit3[,c("X","stack")]
+library(plyr)
+submit3 <- rename(submit3, c("X"="id", "stack"="class"))
+write.csv(submit3, file = "submit3.csv", row.names = FALSE)
+```
+
+
+```{r}
+submit4 <- results.df
+submit4 <- submit4[,c("X","stack")]
+library(plyr)
+submit4 <- rename(submit1, c("X"="id", "stack"="class"))
+write.csv(submit4, file = "submit4.csv", row.names = FALSE)
+```
+
+
+```{r}
+
+```
+
+
+
+
+
+
+```{r}
+# These are the actual predictions of your model
+# generally this will be the result of predict()
+# Use the below 4 lines if you have a real model and want code to write your results
+test_pred <- as.vector(ifelse(predict(m1, type="response", newdata = vtrain.df$class[vtrain.df$training==0], "1", "0")))
+simple_model_id <- 0:(dim(vtrain.df$class[vtrain.df$training==0])[1]-1)
+simple_model_pred <- as.numeric(test_pred)
+simple_results.df <- data.frame("id"=simple_model_id,"class"=simple_model_pred)
+write.csv(results.df,file='my_submission_xgb',row.names = FALSE)
+```
+
+
+### Now apply everything to the test set
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Some useful commands 
+# These commands doesn't work in isolation but I am just adding some snippets 
+# you may find useful.
+
+# # This snippet can be used to sort the term document matrix by frequency
+# m1 <- as.matrix(myTdmNeg)
+# negative_words <- sort(rowSums(m1), decreasing=TRUE)
+# top_neg <- names(negative_words[1:14])
+# 
+# # This snippet can be used to sort the tfidf scores of the words in term document
+# # matrix
+# m1 <- as.matrix(weightTfIdf(myTdmNeg))
+# negative_words <- sort(rowSums(m1), decreasing=TRUE)
+# top_neg <- names(negative_words[1:14])
+# 
+# # This snippet can be used to form bag of word features from a predetermined
+# # set of words. This adds the word counts of "bad","terrible,"worst" of each 
+# # sentence as  a column to your original dataset.
+# train.df$neg = as.matrix((DocumentTermMatrix(myCorpusFull, control = list(dictionary = c("bad","terrible","worst")))))
+```
+
+Sources: 
+UC San Diego. POLI274: Text as Data, M. Roberts
+https://github.com/wush978/FeatureHashing/blob/master/vignettes/SentimentAnalysis.Rmd
+https://www.r-bloggers.com/twitter-sentiment-analysis-with-machine-learning-in-r-using-doc2vec-approach/
