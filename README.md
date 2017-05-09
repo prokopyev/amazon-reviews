@@ -6,6 +6,10 @@ This is a preliminary **work in progress** repo for
 
 [2] prediction of Amazon review sentiments
 
+The method landed me 1st place in a Kaggle In Class competition: 
+
+https://inclass.kaggle.com/c/irgn452-text-mining-task
+
 Training data is Amazon product reviews with either a positive or a negative sentiment, hand-coded.
 
 Goal is to assign sentiment scores to unmarked test data.
