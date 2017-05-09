@@ -1,0 +1,377 @@
+---
+title: "BDA17 Assignment 5: Text mining on Kaggle"
+author: "Anton Prokopyev"
+date: "5/9/2017"
+output:  html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+```{r}
+rm(list = ls(all.names = TRUE))
+setwd('/Users/MacBookAir/Desktop/GoogleDrive/DATA/R/r-big-data/HW5_Kaggle/')
+library(tm)
+```
+
+# LASSO Approach
+```{r}
+getwd()
+# Read the test set
+train.df <- read.csv('train.tsv',sep='\t',stringsAsFactors = FALSE)
+# add validation data as training data, because we are going to test now
+train2.df <- read.csv('validation.tsv',sep='\t',stringsAsFactors = FALSE)
+train.df <- rbind(train.df, train2.df)
+
+# Read the validation set
+# valid.df <- read.csv('validation.tsv',sep='\t',stringsAsFactors = FALSE)
+# Now test data is called validation but still it's called validation==lazy to rewrite
+valid.df <- read.csv('test_pred.tsv',sep='\t',stringsAsFactors = FALSE, header = FALSE,
+                     col.names = c("X","sentence"))
+valid.df$class <- 9999
+
+# Lets see the distribution of training set
+number_of_postive <- dim(train.df[train.df['class'] == 1,])[1]
+number_of_negative <- dim(train.df[train.df['class'] == 0,])[1]
+# print(number_of_postive)
+# print(number_of_negative)
+```
+
+```{r}
+# Using the dataset to build your corpus
+# Refer to the text mining handout for other possible transformations.
+myCorpusFull <- Corpus(VectorSource(train.df$sentence))
+myCorpusFull <- tm_map(myCorpusFull, tolower)
+
+positive.df = train.df[train.df['class'] == 1,]
+nagative.df = train.df[train.df['class'] == 0,]
+
+train.df$training = 1
+valid.df$training = 0
+vtrain.df <- rbind(train.df, valid.df)
+```
+
+```{r}
+library(quanteda)
+vtrain.df$sentence <- as.character(vtrain.df$sentence)
+
+corpus <- corpus(vtrain.df$sentence, 
+                 docvars=vtrain.df)
+# summary(corpus)
+
+toks <- tokens(corpus)
+toks <- tokens_ngrams(toks, n = 1:3)
+
+doc.features <- dfm(toks, verbose = TRUE, stem = TRUE)
+doc.features <- dfm_trim(doc.features, min_count = 1)
+np <- sum(vtrain.df$class==1)
+ns <- sum(vtrain.df$class==0)
+D = np + ns
+m <- t(doc.features)
+nj <- apply(m,1,function (x) sum(x>0))
+nnotj <- apply(m,1,function (x) sum(x==0))
+njp <- apply(m[,train.df$class==1], 1, function (x) sum(x>0))
+njs <- apply(m[,train.df$class==0], 1, function (x) sum(x>0))
+nnotjp <- apply(m[,train.df$class==1], 1, function (x) sum(x==0))
+nnotjs <- apply(m[,train.df$class==0], 1, function (x) sum(x==0))
+
+mi <- njp/D*log((njp*D)/(np*nj),2)+ njs/D*log((njs*D)/(nj*ns),2) +
+  nnotjp/D*log((nnotjp*D)/(np*nnotj),2) +
+  nnotjs/D*log((nnotjs*D)/(nnotj*ns),2) 
+names(mi) <- featnames(doc.features)
+
+m <- as.matrix(doc.features)
+m <- m[,colnames(m)%in%names(mi)[mi>.00199]]
+```
+
+```{r}
+library(glmnet)
+lasso.1 <- glmnet(m[vtrain.df$training==1,], vtrain.df$class[vtrain.df$training==1],
+                  family="binomial", alpha=1)
+lasso.1$lambda
+lasso.1$beta[,1]
+lasso.1$beta[,20]
+
+predict.test <- predict(lasso.1, m[vtrain.df$training==0,])
+dim(predict.test)
+predict.test[1:10,1:10]
+
+predict.mat <- ifelse(predict.test>0,1,0)
+table(predict.mat[,20],vtrain.df$class[vtrain.df$training==0])
+table(predict.mat[,1],vtrain.df$class[vtrain.df$training==0])
+```
+
+```{r}
+library(glmnet)
+cv <- cv.glmnet(m[vtrain.df$training==1,], vtrain.df$class[vtrain.df$training==1],
+                family="binomial", alpha=1, 
+                type="class")
+names(cv)
+plot(log(cv$lambda), cv$cvm, xlab="Log Lambda", ylab="Mean Cross-Validated Error")
+
+# op <- par(mfrow=c(1, 2))
+# plot(cv$glmnet.fit, "norm",   label=TRUE)
+# plot(cv$glmnet.fit, "lambda", label=TRUE)
+# par(op)
+```
+
+```{r}
+results.df <- valid.df
+  
+results.df$LASSO <- predict(cv, newx = m[vtrain.df$training==0,], s = "lambda.min", type = "class")
+
+# library(caret)
+# confusionMatrix(results.df$LASSO, results.df$class)
+```
+
+# XGBoost approach
+```{r}
+library(FeatureHashing)
+library(Matrix)
+library(xgboost)
+```
+
+```{r}
+vtrain.df <- rbind(train.df, valid.df[,1:4])
+vtrain.df$edited <- tolower(gsub("[^[:alnum:] ]", " ", vtrain.df$sentence))
+
+# strwrap(vtrain.df$edited[1], width = 80)
+
+d1 <- hashed.model.matrix(~ split(edited, delim = " ", type = "tf-idf"),
+                          data = vtrain.df, hash.size = 2^16, signed.hash = FALSE)
+
+as.integer(which(d1[1, ] != 0))
+```
+
+```{r}
+# train <- c(1:560); valid <- c(1:nrow(vtrain.df))[-train]
+train <- c(1:700); valid <- c(1:nrow(vtrain.df))[-train]
+dtrain <- xgb.DMatrix(d1[train,], label = vtrain.df$class[vtrain.df$training==1])
+dvalid <- xgb.DMatrix(d1[valid,], label = vtrain.df$class[vtrain.df$training==0])
+watch <- list(train = dtrain, valid = dvalid)
+```
+
+```{r}
+m1 <- xgb.train(booster = "gblinear", nrounds = 1000, eta = 0.02,
+                data = dtrain, objective = "binary:logistic",
+                watchlist = watch, eval_metric = "error", verbose = 0)
+
+results.df$probXGB <- predict(m1, newdata = d1[vtrain.df$training==0,], outputmargin = FALSE)
+hist(results.df$probXGB)
+
+results.df$XGB[which(results.df$probXGB <= 0.5)] <- 0
+results.df$XGB[which(results.df$probXGB > 0.5)] <- 1
+
+# 
+# library(caret)
+# confusionMatrix(results.df$XGB, results.df$class)
+```
+
+```{r}
+importance_matrix <- xgb.importance(model = m1)
+# print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix, top_n = 100)
+```
+
+# Text2Vec Approach
+```{r}
+# loading packages
+library(tidyverse)
+library(text2vec)
+library(caret)
+library(glmnet)
+library(ggrepel)
+ 
+# function for converting some symbols
+conv_fun <- function(x) iconv(x, "latin1", "ASCII", "")
+ 
+# data splitting on train and test
+set.seed(2340)
+# trainIndex <- createDataPartition(text_classified$sentiment, p = 0.8, 
+#  list = FALSE, 
+#  times = 1)
+text_train <- train.df
+text_test <- valid.df
+ 
+##### doc2vec #####
+# define preprocessing function and tokenization function
+prep_fun <- tolower
+tok_fun <- word_tokenizer
+ 
+it_train <- itoken(text_train$sentence, 
+ preprocessor = prep_fun, 
+ tokenizer = tok_fun,
+ ids = text_train$X,
+ progressbar = TRUE)
+it_test <- itoken(text_test$sentence, 
+ preprocessor = prep_fun, 
+ tokenizer = tok_fun,
+ ids = text_test$X,
+ progressbar = TRUE)
+ 
+# creating vocabulary and document-term matrix
+vocab <- create_vocabulary(it_train)
+vectorizer <- vocab_vectorizer(vocab)
+dtm_train <- create_dtm(it_train, vectorizer)
+dtm_test <- create_dtm(it_test, vectorizer)
+# define tf-idf model
+tfidf <- TfIdf$new()
+# fit the model to the train data and transform it with the fitted model
+dtm_train_tfidf <- fit_transform(dtm_train, tfidf)
+dtm_test_tfidf <- fit_transform(dtm_test, tfidf)
+ 
+# train the model
+t1 <- Sys.time()
+glmnet_classifier <- cv.glmnet(x = dtm_train_tfidf,
+ y = text_train[['class']], 
+ family = 'binomial', 
+ # L1 penalty
+ alpha = 1,
+ # interested in the area under ROC curve
+ type.measure = "auc",
+ # 5-fold cross-validation
+ nfolds = 5,
+ # high value is less accurate, but has faster training
+ thresh = 1e-5,
+ # again lower number of iterations for faster training
+ maxit = 1e5)
+print(difftime(Sys.time(), t1, units = 'mins'))
+ 
+plot(glmnet_classifier)
+print(paste("max AUC =", round(max(glmnet_classifier$cvm), 4)))
+ 
+preds <- predict(glmnet_classifier, dtm_test_tfidf, type = 'response')[ ,1]
+auc(as.numeric(text_test$sentiment), preds)
+ 
+# save the model for future using
+saveRDS(glmnet_classifier, 'glmnet_classifier.RDS')
+#######################################################
+```
+
+```{r}
+### fetching text ###
+df_text <- valid.df
+ 
+# preprocessing and tokenization
+it_text <- itoken(df_text$sentence,
+preprocessor = prep_fun,
+tokenizer = tok_fun,
+ids = df_text$X,
+progressbar = TRUE)
+ 
+# creating vocabulary and document-term matrix
+dtm_text <- create_dtm(it_text, vectorizer)
+ 
+# transforming data with tf-idf
+dtm_text_tfidf <- fit_transform(dtm_text, tfidf)
+ 
+# loading classification model
+glmnet_classifier <- readRDS('glmnet_classifier.RDS')
+ 
+# predict probabilities of positiveness
+preds_text <- predict(glmnet_classifier, dtm_text_tfidf, type = 'response')[ ,1]
+ 
+# adding rates to initial dataset
+results.df$probT2V <- preds_text
+
+hist(results.df$probT2V)
+```
+
+```{r}
+results.df$text2vec[which(results.df$probT2V > 0.5)] <- 1
+results.df$text2vec[which(results.df$probT2V < 0.5)] <- 0
+
+# library(caret)
+# confusionMatrix(results.df$text2vec, results.df$class)
+```
+
+# Now stack the 3 models to get the best results
+```{r}
+results.df$sumstack <- as.numeric(results.df$LASSO) + results.df$XGB + results.df$text2vec
+
+
+results.df$stack[which(results.df$sumstack < 2)] <- 0
+results.df$stack[which(results.df$sumstack >= 2)] <- 1
+
+# library(caret)
+# confusionMatrix(results.df$stack, results.df$class)
+```
+
+```{r}
+results.df$sumstack2 <- as.numeric(results.df$LASSO) + results.df$text2vec
+
+# Care more about negative, so to be consideted positive both models need to agree
+results.df$stack2[which(results.df$sumstack2 < 2)] <- 0
+results.df$stack2[which(results.df$sumstack2 >= 2)] <- 1
+ 
+# library(caret)
+# confusionMatrix(results.df$stack2, results.df$class)
+```
+
+```{r}
+write.csv(results.df, file = "results.df.csv", row.names = FALSE)
+```
+
+```{r}
+submit1 <- results.df
+submit1 <- submit1[,c("X","stack")]
+library(plyr)
+submit1 <- rename(submit1, c("X"="id", "stack"="class"))
+write.csv(submit1, file = "submit1.csv", row.names = FALSE)
+```
+
+```{r}
+submit2 <- results.df
+submit2 <- submit2[,c("X","stack2")]
+library(plyr)
+submit1 <- rename(submit2, c("X"="id", "stack2"="class"))
+write.csv(submit1, file = "submit2.csv", row.names = FALSE)
+```
+
+```{r}
+submit3 <- results.df
+submit3 <- submit3[,c("X","stack")]
+library(plyr)
+submit3 <- rename(submit3, c("X"="id", "stack"="class"))
+write.csv(submit3, file = "submit3.csv", row.names = FALSE)
+```
+
+
+```{r}
+submit4 <- results.df
+submit4 <- submit4[,c("X","stack")]
+library(plyr)
+submit4 <- rename(submit4, c("X"="id", "stack"="class"))
+write.csv(submit4, file = "submit4.csv", row.names = FALSE)
+```
+
+```{r}
+submit5 <- results.df
+submit5 <- submit5[,c("X","text2vec")]
+library(plyr)
+submit5 <- rename(submit5, c("X"="id", "text2vec"="class"))
+write.csv(submit5, file = "submit5.csv", row.names = FALSE)
+```
+
+```{r}
+NN = 8
+MM = "stack"
+
+submitany <- results.df
+submitany <- submitany[,c("X", MM)]
+library(plyr)
+#--------------------------------------------v
+submitany <- rename(submitany, c("X"="id", "stack" = "class"))
+
+write.csv(submitany, paste0("submit", NN,"_", MM,".csv"), row.names = FALSE)
+```
+
+Sources:
+
+[1] UC San Diego. POLI274: Text as Data, M. Roberts
+
+[2] https://github.com/wush978/FeatureHashing/blob/master/vignettes/SentimentAnalysis.Rmd
+
+[3] https://www.r-bloggers.com/twitter-sentiment-analysis-with-machine-learning-in-r-using-doc2vec-approach/
